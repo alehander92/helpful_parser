@@ -469,7 +469,7 @@ proc dedent(text: string, i: int): string =
 
 proc generateBase(generator) =
   generator.base = """
-    import strutils, sequtils, sets, pseudo, macros
+    import strutils, sequtils, sets, types, macros
 
     type
       Context = ref object
