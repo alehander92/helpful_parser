@@ -101,6 +101,7 @@ var parser = Parser(
       #name"ComplexitySignature",
       name"Expr"),
     "FunctionDef": And.init(
+      lit"def ",
       name"Name",
       lit"(",
       name"Args",
@@ -168,11 +169,13 @@ proc generateParse(generator; term: Term, i: string): string =
   result = "parse" & result & &"{i}, ctx)"
 
 proc generateMany(generator; term; name: string, join: bool = false): string =
-  result = """
+  result = (&"""
+    log({name})
     var children: seq[Node]
     var i = start
     var success = true
-  """.indent(2)
+  """
+  ).indent(2)
 
   var head = ""
   var loop = ("while true:").indent(2) & "\n"
@@ -216,24 +219,28 @@ proc generateMany(generator; term; name: string, join: bool = false): string =
   result.add("\n")
   let a = if not name.startsWith("Local"): &"{name}.init(children)" else: "children"
   result.add((&"result = ({a}, i, success)").indent(2))
+  result.add((&"finalLog({name})").indent(2))
 
 proc generateOr(generator, term): string =
-  result = ""
+  result = "log(Or)".indent(2)
   for i, child in term.children:
     var i1 = if i == 0: 2 else: 4
     if i > 0:
       result.add("if not result[2]:".indent(2))
     let parse = generator.generateParse(child, "start")
     result.add((&"result = {parse}").indent(i1))
+  result.add("finalLog(Or)".indent(2))
 
 proc generateAnd(generator, term; name: string): string =
-  result = """
+  result = (&"""
+  log({name})
   var children: seq[Node]
   var child: Node
   var i = start
   var success = false
   var localChildren: seq[Node]
-  """.indent(2)
+  """
+  ).indent(2)
 
 
   for i, child in term.children:
@@ -244,7 +251,7 @@ proc generateAnd(generator, term; name: string): string =
         if not success:
         """
         ).indent(2))
-      result.add("return (nil, start, false)".indent(4))
+      result.add((&"finalLog({name});return (nil, start, false)").indent(4))
       result.add("if not child.isNil: children.add(child)".indent(2))
     else:
       let local = &"Local{generator.local}"
@@ -257,23 +264,25 @@ proc generateAnd(generator, term; name: string): string =
         ).indent(2))
 
   result.add((&"result = ({name}.init(children), i, true)").indent(2))
+  result.add((&"finalLog({name})").indent(2))
 
 proc generateBuiltin(generator; term): string =
   result = case term.name:
     of "name":
-      "let sub = ctx.input.substr(start, nameSymbols)\n".indent(2)
+      "log(name)\nlet sub = ctx.input.substr(start, nameSymbols)\n".indent(2)
     of "number":
-      "let sub = ctx.input.substr(start, numberSymbols)\n".indent(2)
+      "log(number)\nlet sub = ctx.input.substr(start, numberSymbols)\n".indent(2)
     else:
       ""
   
   let parse = if term.name == "number": ".parseInt" else: ""
   result.add(&"""
   if sub.len == 0:
-    (nil, start, false)
+    result = (nil, start, false)
   else:
-    ({term.name.capitalizeAscii}.init(sub{parse}), start + sub.len, true)
-    """)
+    result = ({term.name.capitalizeAscii}.init(sub{parse}), start + sub.len, true)
+  finalLog(name)
+  """)
   
 proc generateExpr(generator, term; mapping: Table[string, string]): string =
   var a = "case child1.kind:\n"
@@ -282,6 +291,7 @@ proc generateExpr(generator, term; mapping: Table[string, string]): string =
   a.add("else: nil".indent(12))
   
   result = (&"""
+    log(expr)
     var child0: Node
     var i = start
     var success0 = false
@@ -298,8 +308,9 @@ proc generateExpr(generator, term; mapping: Table[string, string]): string =
           let children = @[child0].concat(child1.children)
           let node = {a}
           result = (node, i, true)
-      return
+        return
     result = (nil, start, false)
+    finalLog(expr)
   """
   ).splitLines.mapIt(if it.len > 2: it[2 .. ^1] else: it).join("\n")
 
@@ -353,11 +364,12 @@ proc dedent(text: string, i: int): string =
 
 proc generateBase(generator) =
   generator.base = """
-    import strutils, sequtils, sets, pseudo
+    import strutils, sequtils, sets, pseudo, macros
 
     type
       Context = ref object
         input: string
+        depth: int
 
     proc toSet(a: HSlice[char, char]): set[char] =
       for b in a:
@@ -377,27 +389,44 @@ proc generateBase(generator) =
           result.add(d)
         i += 1
 
-    var nameSymbols = toSet('a'..'z') + toSet('0'..'9') + {'_'}
+    var nameSymbols = toSet('a'..'z') + {'_'}
     var numberSymbols = toSet('0' .. '9')
 
     proc substrEq(a: string, b: int, c: string): bool =
-      if b + c.len >= a.len:
+      if b + c.len > a.len:
         return false
       else:
         for i, d in c:
           if a[b + i] != d:
             return false
+        echo b, ": ", c, " ", "ok"
         return true
 
+    
+    macro log(name: untyped): untyped =
+      let e = newLit($name)
+      quote:
+        echo repeat("  ", ctx.depth), "visit: ", start, " ", `e`
+        ctx.depth += 1
+
+    macro finalLog(name: untyped): untyped =
+      let e = newLit($name)
+      quote:
+        ctx.depth -= 1
+    
     proc parseLit(a: string, start: int, ctx: Context): (Node, int, bool) =
+      log(lit)
       if ctx.input.substrEq(start, a):
-        return (nil, start + a.len, true)
+        result = (nil, start + a.len, true)
       else:
-        return (nil, start, false)
+        result = (nil, start, false)
+      finalLog(lit)
 
     proc parseSet(a: set[char], start: int, ctx: Context): (Node, int, bool) =
+      log(set)
       let parsed = substr(ctx.input, start, a)
       result = (nil, start + parsed.len, true)
+      finalLog(set)
 
     proc parseIndent(start: int, ctx: Context): (Node, int, bool) =
       parseLit("###INDENT###", start, ctx)
@@ -412,16 +441,41 @@ proc generateBase(generator) =
       parseSet({'\L'}, start, ctx)
 
     proc parseNothing(start: int, ctx: Context): (Node, int, bool) =
-      (nil, start, true)
+      log(nothing)
+      result = (nil, start, true)
+      finalLog(nothing)
 
-  
+    proc load(input: string, indent: int): string =
+      let lines = input.splitLines.mapIt(it.strip(leading=false))
+      result = ""
+      var current = 0
+      for a, line in lines:
+        if line.strip.len == 0:
+          result.add("\n")
+        else:
+          var length = substr(line, 0, {' '}).len
+          var newIndent = length div indent
+          if newIndent > current + 1:
+            raise newException(ValueError, "INDENT " & $a)
+          elif newIndent == current + 1:
+            result.add("###INDENT###" & line[length .. ^1])
+          elif newIndent == current:
+            result.add(line[length .. ^1] & "\n")
+          else:
+            for b in newIndent ..< current:
+              result.add("###DEDENT###\n")
+          current = newIndent
+      if current > 0:
+        for b in 0 ..< current:
+          result.add("###DEDENT###\n")
   """.dedent(4)
 
 
 
-proc generateTop(generator; name: string) =
+proc generateTop(generator; name: string, indent: int) =
   generator.functions.add(("proc parse*(input: string): Node", &"""
-  var ctx = Context(input: input)
+  var i = load(input, {indent})
+  var ctx = Context(input: i)
   var res = parse{name}(0, ctx)
   if res[2]:
     res[0]
@@ -436,7 +490,7 @@ proc generate(parser; filename: string) =
   generator.generateBase()
   for name, term in parser.rules:
     generator.generateRule(name, term, parser)
-  generator.generateTop(parser.top)
+  generator.generateTop(parser.top, parser.indent)
   generator.save()
 
 parser.generate("pseudo2.nim")

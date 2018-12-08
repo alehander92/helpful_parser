@@ -86,7 +86,7 @@ proc text*(node: Node, depth: int): string =
   result = case node.kind:
     of Name, Operator:
       $node.name
-    of Int:
+    of Int, Number:
       $node.i
     of DeclarationHelper:
       $node.declaration
