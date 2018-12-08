@@ -23,7 +23,7 @@ proc substr(a: string, b: int, c: set[char] = {}): string =
     i += 1
 
 var nameSymbols = toSet('a'..'z') + toSet('0'..'9') + {'_'}
-var numberSymbol = toSet('0' .. '9')
+var numberSymbols = toSet('0' .. '9')
 
 proc substrEq(a: string, b: int, c: string): bool =
   if b + c.len >= a.len:
@@ -40,9 +40,29 @@ proc parseLit(a: string, start: int, ctx: Context): (Node, int, bool) =
   else:
     return (nil, start, false)
 
+proc parseSet(a: set[char], start: int, ctx: Context): (Node, int, bool) =
+  let parsed = substr(ctx.input, start, a)
+  result = (nil, start + parsed.len, true)
+
+proc parseIndent(start: int, ctx: Context): (Node, int, bool) =
+  parseLit("###INDENT###", start, ctx)
+
+proc parseDedent(start: int, ctx: Context): (Node, int, bool) =
+  parseLit("###DEDENT###", start, ctx)
+
+proc parseWs(start: int, ctx: Context): (Node, int, bool) =
+  parseSet({' ', '\t'}, start, ctx)
+
+proc parseNl(start: int, ctx: Context): (Node, int, bool) =
+  parseSet({'\L'}, start, ctx)
+
+proc parseNothing(start: int, ctx: Context): (Node, int, bool) =
+  (nil, start, true)
+
 
 proc parseProgram(start: int, ctx: Context): (Node, int, bool)
 proc parseLeftExpr(start: int, ctx: Context): (Node, int, bool)
+# FAITH
 proc parseNumber(start: int, ctx: Context): (Node, int, bool)
 proc parseCallArgs(start: int, ctx: Context): (Node, int, bool)
 proc parseTopLevel(start: int, ctx: Context): (Node, int, bool)
@@ -54,6 +74,7 @@ proc parseRightExpr(start: int, ctx: Context): (Node, int, bool)
 proc parseLocal0(start: int, ctx: Context): (seq[Node], int, bool)
 proc parseCode(start: int, ctx: Context): (Node, int, bool)
 proc parseName(start: int, ctx: Context): (Node, int, bool)
+proc parse*(input: string): Node
 
 proc parseProgram(start: int, ctx: Context): (Node, int, bool) =
   var children: seq[Node]
@@ -73,6 +94,7 @@ proc parseProgram(start: int, ctx: Context): (Node, int, bool) =
     (child0, i0, success0) = parseToplevel(i, ctx)
     if success0:
     
+      discard
       (child1, i1, success1) = parseNl(i0, ctx)
       if success1:
       
@@ -96,15 +118,15 @@ proc parseLeftExpr(start: int, ctx: Context): (Node, int, bool) =
 
 
 
+# FAITH
 proc parseNumber(start: int, ctx: Context): (Node, int, bool) =
   let sub = ctx.input.substr(start, numberSymbols)
   
   if sub.len == 0:
-  (sub, start, false)
+    (nil, start, false)
   else:
-  (sub, start + sub.len, true)
-  
-
+    (Number.init(sub.parseInt), start + sub.len, true)
+    
 
 
 proc parseCallArgs(start: int, ctx: Context): (Node, int, bool) =
@@ -140,12 +162,15 @@ proc parseCallArgs(start: int, ctx: Context): (Node, int, bool) =
       (child1, i1, success1) = parseWs(i0, ctx)
       if success1:
       
+        discard
         (child2, i2, success2) = parseLit(",", i1, ctx)
         if success2:
         
+          discard
           (child3, i3, success3) = parseWs(i2, ctx)
           if success3:
           
+            discard
           else:
             break
         else:
@@ -167,7 +192,28 @@ proc parseTopLevel(start: int, ctx: Context): (Node, int, bool) =
 
 
 proc parseExpr(start: int, ctx: Context): (Node, int, bool) =
+  var child0: Node
+  var i = start
+  var success0 = false
+  var child1: Node
+  var success1 = false
 
+  (child0, i, success0) = parseLeftExpr(start, ctx)
+  if success0:
+    (child1, i, success1) = parseRightExpr(i, ctx)
+    if success1:
+      if child1.isNil:
+        result = (child0, i, true)
+      else:
+        let children = @[child0].concat(child1.children)
+        let node = case child1.kind:
+          of RightCall: Call.init(children)
+          else: nil
+
+        result = (node, i, true)
+    return
+  result = (nil, start, false)
+  
 
 
 proc parseRightCall(start: int, ctx: Context): (Node, int, bool) =
@@ -192,7 +238,8 @@ proc parseRightCall(start: int, ctx: Context): (Node, int, bool) =
   
     return (nil, start, false)
   if not child.isNil: children.add(child)
-result = (RightCall.init(children), i, true)
+  result = (RightCall.init(children), i, true)
+
 
 
 proc parseArgs(start: int, ctx: Context): (Node, int, bool) =
@@ -228,12 +275,15 @@ proc parseArgs(start: int, ctx: Context): (Node, int, bool) =
       (child1, i1, success1) = parseWs(i0, ctx)
       if success1:
       
+        discard
         (child2, i2, success2) = parseLit(",", i1, ctx)
         if success2:
         
+          discard
           (child3, i3, success3) = parseWs(i2, ctx)
           if success3:
           
+            discard
           else:
             break
         else:
@@ -279,7 +329,8 @@ proc parseFunctionDef(start: int, ctx: Context): (Node, int, bool) =
   
     return (nil, start, false)
   if not child.isNil: children.add(child)
-result = (FunctionDef.init(children), i, true)
+  result = (FunctionDef.init(children), i, true)
+
 
 
 proc parseRightExpr(start: int, ctx: Context): (Node, int, bool) =
@@ -307,6 +358,7 @@ proc parseLocal0(start: int, ctx: Context): (seq[Node], int, bool) =
     (child0, i0, success0) = parseExpr(i, ctx)
     if success0:
     
+      discard
       (child1, i1, success1) = parseNl(i0, ctx)
       if success1:
       
@@ -348,17 +400,27 @@ proc parseCode(start: int, ctx: Context): (Node, int, bool) =
   
     return (nil, start, false)
   if not child.isNil: children.add(child)
-result = (Code.init(children), i, true)
+  result = (Code.init(children), i, true)
+
 
 
 proc parseName(start: int, ctx: Context): (Node, int, bool) =
   let sub = ctx.input.substr(start, nameSymbols)
   
   if sub.len == 0:
-  (sub, start, false)
+    (nil, start, false)
   else:
-  (sub, start + sub.len, true)
-  
+    (Name.init(sub), start + sub.len, true)
+    
 
+
+proc parse*(input: string): Node =
+  var ctx = Context(input: input)
+  var res = parseProgram(0, ctx)
+  if res[2]:
+    res[0]
+  else:
+    echo "error"
+    nil
 
 

@@ -151,7 +151,8 @@ proc indent(text: string, i: int): string =
 
 proc generateHeader(generator; name: string): string =
   let typ = if not name.startsWith("Local"): "Node" else: "seq[Node]"
-  result = &"proc parse{name.capitalizeAscii}(start: int, ctx: Context): ({typ}, int, bool)"
+  result = if name == "number": "# FAITH\n" else: ""
+  result.add(&"proc parse{name.capitalizeAscii}(start: int, ctx: Context): ({typ}, int, bool)")
 
 proc generateParse(generator; term: Term, i: string): string =
   result = case term.kind:
@@ -202,6 +203,8 @@ proc generateMany(generator; term; name: string, join: bool = false): string =
       loop.add("\n")
       loop.add((&"i = i{i}").indent(i * 2 + 6))
       loop.add("\n")
+    else:
+      loop.add("discard".indent(i * 2 + 6))
   for i in countdown(term.children.len - 1, 0):
     let child = term.children[i]
 
@@ -253,7 +256,7 @@ proc generateAnd(generator, term; name: string): string =
         """
         ).indent(2))
 
-  result.add(&"result = ({name}.init(children), i, true)")
+  result.add((&"result = ({name}.init(children), i, true)").indent(2))
 
 proc generateBuiltin(generator; term): string =
   result = case term.name:
@@ -264,15 +267,41 @@ proc generateBuiltin(generator; term): string =
     else:
       ""
   
-  result.add("""
-    if sub.len == 0:
-      (sub, start, false)
-    else:
-      (sub, start + sub.len, true)
-    """.indent(2))
+  let parse = if term.name == "number": ".parseInt" else: ""
+  result.add(&"""
+  if sub.len == 0:
+    (nil, start, false)
+  else:
+    ({term.name.capitalizeAscii}.init(sub{parse}), start + sub.len, true)
+    """)
   
 proc generateExpr(generator, term; mapping: Table[string, string]): string =
-  result = ""  
+  var a = "case child1.kind:\n"
+  for name, realName in mapping:
+    a.add((&"of {name}: {realName}.init(children)").indent(12))
+  a.add("else: nil".indent(12))
+  
+  result = (&"""
+    var child0: Node
+    var i = start
+    var success0 = false
+    var child1: Node
+    var success1 = false
+
+    (child0, i, success0) = parseLeftExpr(start, ctx)
+    if success0:
+      (child1, i, success1) = parseRightExpr(i, ctx)
+      if success1:
+        if child1.isNil:
+          result = (child0, i, true)
+        else:
+          let children = @[child0].concat(child1.children)
+          let node = {a}
+          result = (node, i, true)
+      return
+    result = (nil, start, false)
+  """
+  ).splitLines.mapIt(if it.len > 2: it[2 .. ^1] else: it).join("\n")
 
 proc generateRule(generator; name: string; term; parser: Parser) =
   var header = ""
@@ -349,7 +378,7 @@ proc generateBase(generator) =
         i += 1
 
     var nameSymbols = toSet('a'..'z') + toSet('0'..'9') + {'_'}
-    var numberSymbol = toSet('0' .. '9')
+    var numberSymbols = toSet('0' .. '9')
 
     proc substrEq(a: string, b: int, c: string): bool =
       if b + c.len >= a.len:
@@ -366,14 +395,48 @@ proc generateBase(generator) =
       else:
         return (nil, start, false)
 
+    proc parseSet(a: set[char], start: int, ctx: Context): (Node, int, bool) =
+      let parsed = substr(ctx.input, start, a)
+      result = (nil, start + parsed.len, true)
 
+    proc parseIndent(start: int, ctx: Context): (Node, int, bool) =
+      parseLit("###INDENT###", start, ctx)
+
+    proc parseDedent(start: int, ctx: Context): (Node, int, bool) =
+      parseLit("###DEDENT###", start, ctx)
+
+    proc parseWs(start: int, ctx: Context): (Node, int, bool) =
+      parseSet({' ', '\t'}, start, ctx)
+
+    proc parseNl(start: int, ctx: Context): (Node, int, bool) =
+      parseSet({'\L'}, start, ctx)
+
+    proc parseNothing(start: int, ctx: Context): (Node, int, bool) =
+      (nil, start, true)
+
+  
   """.dedent(4)
+
+
+
+proc generateTop(generator; name: string) =
+  generator.functions.add(("proc parse*(input: string): Node", &"""
+  var ctx = Context(input: input)
+  var res = parse{name}(0, ctx)
+  if res[2]:
+    res[0]
+  else:
+    echo "error"
+    nil
+"""
+  ))
 
 proc generate(parser; filename: string) =
   var generator = NimGenerator(filename: filename)
   generator.generateBase()
   for name, term in parser.rules:
     generator.generateRule(name, term, parser)
+  generator.generateTop(parser.top)
   generator.save()
 
 parser.generate("pseudo2.nim")
