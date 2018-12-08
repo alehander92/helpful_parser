@@ -24,13 +24,13 @@ import sequtils, strutils, strformat, tables, macros
 
 type
   # Pray
-  TermKind* = enum And, Or, Builtin, Name, Many, Nl, Ws, Indent, Dedent, Nothing, Expr, Join, Lit
+  TermKind* = enum And, Or, Builtin, Name, Many, Nl, Ws, Indent, Dedent, Nothing, Expr, Join, JoinSome Lit
 
   Term* = ref object
     case kind*: TermKind:
     of Builtin, Name:
       name*: string
-    of And, Or, Many, Join:
+    of And, Or, Many, Join, JoinSome:
       children*: seq[Term]
     of Expr:
       left*: Term
@@ -63,6 +63,7 @@ type
     indent*:  int
     top*:     string
     mapping*: Table[string, string]
+    help*:    seq[string]
 
   NimGenerator* = object
     functions*: seq[(string, string)]
@@ -97,8 +98,8 @@ var parser = Parser(
     "Program": Many.init(name"Toplevel", nl),
     "TopLevel": Or.init(
       name"FunctionDef",
-      #name"Signature",
-      #name"ComplexitySignature",
+      name"Signature",
+      name"ComplexityRule",
       name"Expr"),
     "FunctionDef": And.init(
       lit"def ",
@@ -109,15 +110,25 @@ var parser = Parser(
       name"Code"),
     "Expr": Term(kind: Expr),
     "LeftExpr": Or.init(
+        name"Declaration",
+        name"Assign",
+        name"ForRange",
+        name"ReturnNode",
         name"Name",
         name"Number"),
     "RightExpr": Or.init(
         name"RightCall",
+        name"RightInfix",
         nothing),
     "RightCall": And.init(
       lit"(",
       name"CallArgs",
       lit")"),
+    "RightInfix": And.init(
+      ws,
+      name"Operator",
+      ws,
+      name"Expr"),
     "CallArgs": Join.init(
       name"Expr",
       ws,
@@ -134,11 +145,87 @@ var parser = Parser(
       lit",",
       ws),
     "Name": builtin"name",
-    "Number": builtin"number"
+    "Number": builtin"number",
+    "Type": Or.init(
+      name"Typename",
+      name"Index"),
+    "Index": And.init(
+      name"Typename",
+      lit"[",
+      name"Expr",
+      lit"]"),
+    "Signature": JoinSome.init(
+      name"Type",
+      lit"->"),
+    "ComplexityRule": And.init(
+      lit"%",
+      name"ComplexitySignature"),
+    "ComplexitySignature": JoinSome.init(
+      name"ComplexityA",
+      lit"->"),
+    "BigO": And.init(
+      lit"O[",
+      name"ComplexityExpression",
+      lit"]"),
+    "BigM": And.init(
+      lit"M[",
+      name"ComplexityExpression",
+      lit"]"),
+    "ComplexityA": Or.init(
+      name"ComplexityExpression",
+      name"BigO",
+      name"BigM"),
+    "ComplexityExpression": Or.init(
+      name"ComplexityInfix",
+      name"Name",
+      name"Number"),
+    "ComplexityInfix": And.init(
+      name"Simple",
+      ws,
+      name"Operator",
+      ws,
+      name"ComplexityExpression"),
+    "Operator": builtin"operator",
+    "Simple": Or.init(
+      name"Name",
+      name"Number"),
+    "Declaration": And.init(
+      name"DeclarationName",
+      ws,
+      name"Assign"),
+    "DeclarationName": Or.init(
+      lit"let",
+      lit"var"),
+    "Assign": And.init(
+      name"Name",
+      ws,
+      lit"=",
+      ws,
+      name"Expr"),
+    "ForRange": And.init(
+      lit"for ",
+      ws,
+      name"Name",
+      ws,
+      lit"in ",
+      ws,
+      name"Expr",
+      ws,
+      lit"..<",
+      ws,
+      name"Expr",
+      lit":",
+      name"Code"),
+    "ReturnNode": And.init(
+      lit"return ",
+      ws,
+      name"Expr"),
+    "Typename": builtin"typename"
   }.toTable(),
   indent: 2,
   top: "Program",
-  mapping: {"RightCall": "Call"}.toTable())
+  help: @["BigO", "BigM", "ReturnNode"],
+  mapping: {"RightCall": "Call", "RightInfix": "InfixOp"}.toTable())
 
 using
   parser: Parser
@@ -168,7 +255,7 @@ proc generateParse(generator; term: Term, i: string): string =
   
   result = "parse" & result & &"{i}, ctx)"
 
-proc generateMany(generator; term; name: string, join: bool = false): string =
+proc generateMany(generator; term; name: string, join: bool = false, some: bool = false): string =
   result = (&"""
     log({name})
     var children: seq[Node]
@@ -194,7 +281,7 @@ proc generateMany(generator; term; name: string, join: bool = false): string =
       var success{i} = false
       """
       ).indent(2))
-    let i1 = if i == 0: "i" else: &"i{i - 1}"
+    let i1 = if i == 0: &"i{term.children.len - 1}" else: &"i{i - 1}"
     let parse = generator.generateParse(child, i1)
     loop.add((&"""
       (child{i}, i{i}, success{i}) = {parse}
@@ -218,20 +305,25 @@ proc generateMany(generator; term; name: string, join: bool = false): string =
   result.add(loop)
   result.add("\n")
   let a = if not name.startsWith("Local"): &"{name}.init(children)" else: "children"
+  if some:
+    result.add((&"success = children.len > 0").indent(2))
   result.add((&"result = ({a}, i, success)").indent(2))
   result.add((&"finalLog({name})").indent(2))
 
-proc generateOr(generator, term): string =
-  result = "log(Or)".indent(2)
+proc generateOr(generator, term; name: string): string =
+  # support lit only
+  result = (&"log({name})").indent(2)
   for i, child in term.children:
     var i1 = if i == 0: 2 else: 4
     if i > 0:
       result.add("if not result[2]:".indent(2))
     let parse = generator.generateParse(child, "start")
     result.add((&"result = {parse}").indent(i1))
-  result.add("finalLog(Or)".indent(2))
+    if child.kind == Lit:
+      result.add((&"result[0] = {name}.init(\"{child.text}\")").indent(i1))  
+  result.add((&"finalLog({name})").indent(2))
 
-proc generateAnd(generator, term; name: string): string =
+proc generateAnd(generator, term; name: string, help: bool = false): string =
   result = (&"""
   log({name})
   var children: seq[Node]
@@ -243,7 +335,10 @@ proc generateAnd(generator, term; name: string): string =
   ).indent(2)
 
 
+  var actual = 0
   for i, child in term.children:
+    if child.kind == Name:
+      actual += 1
     if child.kind != Many:
       let parse = generator.generateParse(child, "i")
       result.add((&"""
@@ -263,7 +358,11 @@ proc generateAnd(generator, term; name: string): string =
         """
         ).indent(2))
 
-  result.add((&"result = ({name}.init(children), i, true)").indent(2))
+  if actual != 1 or help:
+    result.add((&"result = ({name}.init(children), i, true)").indent(2))
+  else:
+    # only one child and not help, directly it
+    result.add(("result = (children[0], i, true)").indent(2))
   result.add((&"finalLog({name})").indent(2))
 
 proc generateBuiltin(generator; term): string =
@@ -272,6 +371,10 @@ proc generateBuiltin(generator; term): string =
       "log(name)\nlet sub = ctx.input.substr(start, nameSymbols)\n".indent(2)
     of "number":
       "log(number)\nlet sub = ctx.input.substr(start, numberSymbols)\n".indent(2)
+    of "typename":
+      "log(typename)\nlet sub = ctx.input.substr(start, typeSymbols)\n".indent(2)
+    of "operator":
+      "log(operator)\nlet sub = ctx.input.substr(start, operatorSymbols)\n".indent(2)
     else:
       ""
   
@@ -317,7 +420,7 @@ proc generateExpr(generator, term; mapping: Table[string, string]): string =
 proc generateRule(generator; name: string; term; parser: Parser) =
   var header = ""
   case term.kind:
-  of Many, Or, And, Join:
+  of Many, Or, And, Join, JoinSome:
     header = generator.generateHeader(name)
   of Builtin:
     header = generator.generateHeader(term.name)
@@ -331,15 +434,17 @@ proc generateRule(generator; name: string; term; parser: Parser) =
   of Many:
     code = generator.generateMany(term, name)
   of Or:
-    code = generator.generateOr(term)
+    code = generator.generateOr(term, name)
   of Builtin:
     code = generator.generateBuiltin(term)
   of Join:
     code = generator.generateMany(term, name, join=true)
+  of JoinSome:
+    code = generator.generateMany(term, name, join=true, some=true)
   of Expr:
     code = generator.generateExpr(term, parser.mapping)
   of And:
-    code = generator.generateAnd(term, name)
+    code = generator.generateAnd(term, name, help=name in parser.help)
   else:
     echo name, term.kind
     discard
@@ -391,6 +496,8 @@ proc generateBase(generator) =
 
     var nameSymbols = toSet('a'..'z') + {'_'}
     var numberSymbols = toSet('0' .. '9')
+    var typeSymbols = toSet('A'..'Z') + toSet('a'..'z') + {'_'}
+    var operatorSymbols = {'+', '-', '*', '^'}
 
     proc substrEq(a: string, b: int, c: string): bool =
       if b + c.len > a.len:
@@ -458,12 +565,13 @@ proc generateBase(generator) =
           if newIndent > current + 1:
             raise newException(ValueError, "INDENT " & $a)
           elif newIndent == current + 1:
-            result.add("###INDENT###" & line[length .. ^1])
+            result.add("###INDENT###" & line[length .. ^1] & "\n")
           elif newIndent == current:
             result.add(line[length .. ^1] & "\n")
           else:
             for b in newIndent ..< current:
               result.add("###DEDENT###\n")
+            result.add(line[length .. ^1] & "\n")
           current = newIndent
       if current > 0:
         for b in 0 ..< current:
@@ -475,6 +583,7 @@ proc generateBase(generator) =
 proc generateTop(generator; name: string, indent: int) =
   generator.functions.add(("proc parse*(input: string): Node", &"""
   var i = load(input, {indent})
+  echo i
   var ctx = Context(input: i)
   var res = parse{name}(0, ctx)
   if res[2]:

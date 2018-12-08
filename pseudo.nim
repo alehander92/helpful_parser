@@ -11,12 +11,12 @@ type
     Operator,
     Args,
     Name,
+    Typename,
     Int,
     Number,
     Call,
     Assign,
     Declaration,
-    DeclarationHelper,
     ForRange,
     ForIn,
     ReturnNode,
@@ -24,17 +24,20 @@ type
     ComplexitySignature,
     CallArgs,
     # Good
-    RightCall
+    RightCall,
+    Index,
+    BigM,
+    ComplexityInfix,
+    DeclarationName,
+    RightInfix
 
 
   Node* = ref object
     case kind*: NodeKind:
-    of Name, Operator:
+    of Name, Operator, Typename, DeclarationName:
       name*: string
     of Int, Number:
       i*:    int
-    of DeclarationHelper:
-      declaration*: DeclarationKind
     else:
       children*: seq[Node]
     typ*: Type
@@ -77,19 +80,23 @@ proc init*(kind: NodeKind, i: int): Node =
 
 
 proc init*(kind: NodeKind, name: string): Node =
-  assert kind == Name
-  Node(kind: Name, name: name)
+  if kind == Name:
+    Node(kind: Name, name: name)
+  elif kind == Typename:
+    Node(kind: Typename, name: name)
+  elif kind == DeclarationName:
+    Node(kind: DeclarationName, name: name)
+  else:
+    nil
 
 proc text*(node: Node, depth: int): string =
   if node.isNil:
     return repeat("  ", depth) & "nil"
   result = case node.kind:
-    of Name, Operator:
+    of Name, Operator, Typename, DeclarationName:
       $node.name
     of Int, Number:
       $node.i
-    of DeclarationHelper:
-      $node.declaration
     else:
       $node.kind & ":\n" & node.children.mapIt(it.text(depth + 1)).join("\n")
   result = repeat("  ", depth) & result
